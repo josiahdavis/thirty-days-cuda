@@ -9,6 +9,9 @@
     Reads block width + 2 * radius input elements from global memory into shared memory.
     Computes block width output elements.
     Writes block width output elements from shared memory to global memory.
+
+    References:
+    
 */
 
 using namespace std;
@@ -25,8 +28,8 @@ __global__ void stencil_1d(int *in, int *out){
     // Read input elements into shared memory
     temp[left_index] = in[global_index]; // Gives us everything except the halo
     if (threadIdx.x < RADIUS){
-        temp[left_index - RADIUS] = in[global_index - RADIUS];
-        temp[left_index + BLOCK_SIZE] = in[global_index + BLOCK_SIZE];
+        temp[left_index - RADIUS] = in[global_index - RADIUS];         // gives us the left halo
+        temp[left_index + BLOCK_SIZE] = in[global_index + BLOCK_SIZE]; // gives us the right halo
     }
 
     // All threads must have loaded the shared memory before we can begin our stencil operation
