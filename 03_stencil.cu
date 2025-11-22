@@ -11,7 +11,8 @@
     Writes block width output elements from shared memory to global memory.
 
     References:
-    
+    https://github.com/olcf/cuda-training-series/blob/master/exercises/hw2/stencil_1d.cu
+    https://vimeo.com/393552516
 */
 
 using namespace std;
