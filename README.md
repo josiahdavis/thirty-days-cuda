@@ -5,7 +5,19 @@
 * Here is an example of how to run: 
 
 ```
-nvcc -o hello 00_hello.cu && ./hello
+nvcc -o main 00_hello.cu
+./main
+```
+
+* Here is example output:
+
+```
+Hello from block 1, thread 0
+Hello from block 1, thread 1
+Hello from block 1, thread 2
+Hello from block 0, thread 0
+Hello from block 0, thread 1
+Hello from block 0, thread 2
 ```
 
 ## Resources
