@@ -51,13 +51,14 @@ int main(){
     cudaMemcpy(d_A, h_A, N*sizeof(float), cudaMemcpyHostToDevice);
     cudaCheckErrors("cudaMemcpy H2D failure");
     
-    // stage 1: block-level reduction. result is that block has it's own partial sum
-    //          here we are using 640*256 threads simultaneously.
+    // Stage 1: Each thread block calculates it's own partial max in d_maxes, 
+    //          taking advantage of fast shared memory which operates at the block-level.
+    //          Using 640*256 threads simultaneously.
     reduce<<<blocks, BLOCK_SIZE>>>(d_A, d_maxes, N);
     cudaCheckErrors("reduction kernel launch failure");
     
-    // stage 2: block reduction. reduce the partial sums (previously calculated at the block-leve) 
-    //          into single value d_A[0]. Calculation done in a single block.
+    // Stage 2: Max across the partial maxes into a single scalar stored in d_A[0].
+    //          Calculation done in a single block of 256 theads.
     reduce<<<1, BLOCK_SIZE>>>(d_maxes, d_A, blocks); 
     cudaCheckErrors("reduction kernel launch failure");
     
