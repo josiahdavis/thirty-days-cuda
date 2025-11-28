@@ -37,32 +37,32 @@ __global__ void reduce(float *gdata, float *out, size_t n){
 }
 
 int main(){
-    float *h_A, *h_sum, *d_A, *d_sums;
+    float *h_A, *h_max, *d_A, *d_maxes;
     const int blocks = 640;
     h_A = new float[N]; // allocate space for data in host memory
-    h_sum = new float;
+    h_max = new float;
     float max_val = 5.0f;
     for (size_t i = 0; i < N; i++)
         h_A[i] = 1.0f;
     h_A[100] = max_val;
     cudaMalloc(&d_A, N*sizeof(float));
-    cudaMalloc(&d_sums, blocks*sizeof(float));
+    cudaMalloc(&d_maxes, blocks*sizeof(float));
     cudaCheckErrors("cudaMalloc failure");
     cudaMemcpy(d_A, h_A, N*sizeof(float), cudaMemcpyHostToDevice);
     cudaCheckErrors("cudaMemcpy H2D failure");
     
     // stage 1: block-level reduction. result is that block has it's own partial sum
     //          here we are using 640*256 threads simultaneously.
-    reduce<<<blocks, BLOCK_SIZE>>>(d_A, d_sums, N);
+    reduce<<<blocks, BLOCK_SIZE>>>(d_A, d_maxes, N);
     cudaCheckErrors("reduction kernel launch failure");
     
-    // stage 2: block reduction. reduce across blocks into single value d_A[0].
-    //          
-    reduce<<<1, BLOCK_SIZE>>>(d_sums, d_A, blocks); 
+    // stage 2: block reduction. reduce the partial sums (previously calculated at the block-leve) 
+    //          into single value d_A[0]. Calculation done in a single block.
+    reduce<<<1, BLOCK_SIZE>>>(d_maxes, d_A, blocks); 
     cudaCheckErrors("reduction kernel launch failure");
     
-    cudaMemcpy(h_sum, d_A, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_max, d_A, sizeof(float), cudaMemcpyDeviceToHost);
     cudaCheckErrors("cudaMemcpy D2H failure");
-    printf("output: %f, expected sum: %f, expected max %f\n", *h_sum, (float)((N-1) + max_val), max_val);
+    printf("output: %f, expected max %f\n", *h_max, max_val);
     return 0;
 }
