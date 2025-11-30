@@ -20,6 +20,12 @@ Hello from block 0, thread 1
 Hello from block 0, thread 2
 ```
 
+* To run with profiling, simply do:
+
+```
+nsys profile --stats=true ./main
+```
+
 ## Resources
 
 * Oak Ridge National Lab hosted a great NVIDIA [training](https://www.olcf.ornl.gov/cuda-training-series/) with [exercises](https://github.com/olcf/cuda-training-series).
