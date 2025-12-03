@@ -1,7 +1,6 @@
 // References:
 //  https://github.com/olcf/cuda-training-series/blob/master/exercises/hw6/array_inc.cu
 //  Kernel execution takes 109505591 ns, previously it was taking 369731 ns.
-//  Double check against solution code.
 
 #include <cstdio>
 #include <cstdlib>
