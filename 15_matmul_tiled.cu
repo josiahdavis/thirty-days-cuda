@@ -245,6 +245,6 @@ int main() {
     free(h_C);
     free(h_C_ref);
     
-    printf("\nDone!\n");
+    printf("\nDone! Next up, compare to cuBLAS!\n");
     return 0;
 }
