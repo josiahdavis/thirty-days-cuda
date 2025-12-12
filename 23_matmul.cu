@@ -1,6 +1,6 @@
 /*
  * Comparison of custom Matrix Multiplication with CUBLAS.
- * Compile: nvcc 22_matmul.cu -o main -lcublas
+ * Compile: nvcc 23_matmul.cu -o main -lcublas
  * Run: ./main
  */
 
@@ -33,96 +33,36 @@
     } while(0)
 
 /*
- * Method 1: Vectorize SMEM and GMEM Accesses (81% speed of cuBLAS.)
+ * Method 1: Shared Memory Matmul (23% speed of cuBLAS.)
  * Computes: C = A * B where A is (M x K) and B is (K x N)
- * Source: https://siboehm.com/articles/22/CUDA-MMM (Kernel 6)
+ * Source: https://github.com/olcf/cuda-training-series/blob/master/exercises/hw2/matrix_mul_shared_solution.cu
  */
 
-#define BM 128
-#define BN 128
-#define BK 8
-#define TM 8
-#define TN 8
-
 __global__ void customMatMul(float* A, float* B, float* C, int M, int K, int N) {
-    const uint cRow = blockIdx.y;
-    const uint cCol = blockIdx.x;
 
-    // BN/TN are the number of threads to span a column
-    const int threadCol = threadIdx.x % (BN / TN);
-    const int threadRow = threadIdx.x / (BN / TN);
+    // declare ther user-managed cache in shared memory
+    __shared__ float As[BLOCK_SIZE][BLOCK_SIZE];
+    __shared__ float Bs[BLOCK_SIZE][BLOCK_SIZE];
 
-    // allocate space for the current blocktile in smem
-    __shared__ float As[BM * BK];
-    __shared__ float Bs[BN * BK];
+    int gx = threadIdx.x + blockDim.x * blockIdx.x; // global thread x index
+    int gy = threadIdx.y + blockDim.y * blockIdx.y; // global thread y index
+    
+    if (gy < M && gx < N){
+        float tmp = 0;
+        for (int i = 0; i < K / BLOCK_SIZE; i++){
+            As[threadIdx.y][threadIdx.x] = A[gy * K + (i * BLOCK_SIZE + threadIdx.x)];
+            Bs[threadIdx.y][threadIdx.x] = B[(i * BLOCK_SIZE + threadIdx.y) * N + gx];
 
-    // Move blocktile to beginnning of A's row and B's column
-    A += cRow * BM * K;
-    B += cCol * BN;
-    C += cRow * BM * N + cCol * BN;
+            // Wait for all threads in block to load into shared memory for the k-th tile
+            __syncthreads();
 
-    // Calculating the indices taht this thread will load into SMEM
-    // we'll load 128bit / 32bit = 4 elements per thread at each step
-    const uint innerRowA = threadIdx.x / (BK / 4);
-    const uint innerColA = threadIdx.x % (BK / 4);
-    const uint innerRowB = threadIdx.x / (BN / 4);
-    const uint innerColB = threadIdx.x % (BN / 4);
-
-    // thread-local cache for results in registerfile
-    float threadResults[TM * TN] = {0.0};
-    float regM[TM] = {0.0};
-    float regN[TN] = {0.0};
-
-    // outer-most loop over block tiles
-    for (uint bkIdx = 0; bkIdx < K; bkIdx += BK){
-        // populat the SMEM caches
-        // transpose A while loading it
-        float4 tmp = reinterpret_cast<float4 *>(&A[innerRowA * K + innerColA * 4])[0];
-        As[(innerColA * 4 + 0) * BM + innerRowA] = tmp.x;
-        As[(innerColA * 4 + 1) * BM + innerRowA] = tmp.y;
-        As[(innerColA * 4 + 2) * BM + innerRowA] = tmp.z;
-        As[(innerColA * 4 + 3) * BM + innerRowA] = tmp.w;
-
-        reinterpret_cast<float4 *>(&Bs[innerRowB * BN + innerColB * 4])[0] = reinterpret_cast<float4 *>(&B[innerRowB * N + innerColB * 4])[0];
-        __syncthreads();
-
-        // advance blocktile
-        A += BK;        // move BK columns to right
-        B += BK * N;    // move BK rows down
-
-        // calculate per-thread results
-        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx){
-            // block into registers
-            for (uint i = 0; i < TM; ++i){
-                regM[i] = As[dotIdx * BM + threadRow * TM + i];
+            // Keep track of running sum
+            for (int k = 0; k < BLOCK_SIZE; k++){
+                tmp += As[threadIdx.y][k] * Bs[k][threadIdx.x]; // Dot product calculates from shared memory now! 
             }
-            for (uint i = 0; i < TN; ++i){
-                regN[i] = Bs[dotIdx * BN + threadCol * TN + i];
-            }
-            for (uint resIdxM = 0; resIdxM < TM; ++resIdxM){
-                for (uint resIdxN = 0; resIdxN < TN; ++resIdxN){
-                    threadResults[resIdxM * TN + resIdxN] += regM[resIdxM] * regN[resIdxN];
-                }
-            }
+            __syncthreads();
         }
-        __syncthreads();
-    }
-
-    // write results out
-    for (uint resIdxM = 0; resIdxM < TM; resIdxM += 1){
-        for (uint resIdxN = 0; resIdxN < TN; resIdxN += 4){
-            // load C vector into registers
-            float4 tmp = reinterpret_cast<float4 *>(&C[(threadRow * TM + resIdxM) * N + threadCol * TN + resIdxN])[0];
-
-            // perform GEMM update in reg
-            tmp.x = threadResults[resIdxM * TN + resIdxN];
-            tmp.y = threadResults[resIdxM * TN + resIdxN + 1];
-            tmp.z = threadResults[resIdxM * TN + resIdxN + 2];
-            tmp.w = threadResults[resIdxM * TN + resIdxN + 3];
-
-            // Write back
-            reinterpret_cast<float4 *>(&C[(threadRow * TM + resIdxM) * N + threadCol * TN + resIdxN])[0] = tmp;
-        }
+        C[gy * N + gx] = tmp;
     }
 }
 
@@ -270,8 +210,8 @@ int main() {
     printf("METHOD 1: custom Matmul Kernel\n");
     printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     
-    dim3 gridDim((N + BN - 1) / BN, (M + BM - 1) / BM);
-    dim3 blockDim((BM * BN) / (TM * TN));
+    dim3 gridDim((N + BLOCK_SIZE - 1) / BLOCK_SIZE, (M + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    dim3 blockDim(BLOCK_SIZE, BLOCK_SIZE);
     
     // Warm-up
     customMatMul<<<gridDim, blockDim>>>(d_A, d_B, d_C, M, K, N);
