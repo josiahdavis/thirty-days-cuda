@@ -40,96 +40,95 @@
 /*
  * Method Shared Memory Blocking
  * Computes: C = A * B where A is (M x K) and B is (K x N)
- * Modified from source: https://siboehm.com/articles/22/CUDA-MMM (Kernel #5)
+ * Modified from source: https://github.com/philipfabianek/cuda-gemm-from-scratch/blob/main/src/kernels/04_2D_coarsened.cuh
  */
 
 __global__ void customMatMul(float* A, float* B, float* C, int M, int K, int N) {
     // Simon's approach
     //      60.8% speed of cuBLAS on my A100
+    // Philip's approach:
+    //      84.5% speed of cuBLAS
     // Modified approach with 2D grid of threads
-    //      75.6% speed of cuBLAS on my A100
+    //      84.9% speed of cuBLAS
 
-    const uint cRow = blockIdx.y;
-    const uint cCol = blockIdx.x;
+    // Move to upper left corner of correct block
+    A += blockIdx.y * BM * K;                    // Shift down BM * K rows
+    B += blockIdx.x * BN;                        // Shift right BN cols
+    C += blockIdx.y * BM * N + blockIdx.x * BN;
 
-    // How many threads in the thread block
-    const uint numThreadsBlocktile = (BM * BN) / (TM * TN);
-    assert(numThreadsBlocktile == (blockDim.x * blockDim.y));
+    __shared__ float A_tile[BM * BK];
+    __shared__ float B_tile[BK * BN];
 
-    // Thread coordinate calculation. 
-    // Original:
-    // const int threadCol = threadIdx.x % (BN / TN);
-    // const int threadRow = threadIdx.x / (BN / TN);
-    // Simplified: 
-    const int threadCol = threadIdx.x * TN;
-    const int threadRow = threadIdx.y * TM;
+    // Compute thread indices for loading data into smem
+    const int threadId = threadIdx.y * blockDim.x + threadIdx.x;
+    const int A_smem_col = threadId % BK;
+    const int A_smem_row = threadId / BK;
+    const int B_smem_col = threadId % BN;
+    const int B_smem_row = threadId / BN;
 
-    __shared__ float As[BM * BK];
-    __shared__ float Bs[BK * BN];
+    // What are we striding over? 
+    const int num_threads = BM * BN / (TM * TN);
+    const int A_row_stride = num_threads / BK;
+    const int B_row_stride = num_threads / BN;
 
-    // Shift to the appropriate upper level corner for the block
-    // "Set it (the pointer) and forget it (the block level when writing inner loops)"
-    A += cRow * BM * K;              // row = cRow, col = 0
-    B += cCol * BN;                  // row = 0, col = cCol
-    C += cRow * BM * N + cCol * BN;  // row = cRow, col = cCol
+    // Calculate the starting position of each thread's assigned minitile within
+    // the output matrix C
+    const int C_inner_col = threadIdx.x * TN;
+    const int C_inner_row = threadIdx.y * TM;
 
-    // Calculate indices this thread will load into SMEM.
-    // This is the row/col within the block.
-    // const uint innerRowA = threadIdx.x / BK; // Could be simplified to threadIdx.x and threadIdx.y?
-    // const uint innerColA = threadIdx.x % BK;
-    const uint threadId = threadIdx.y * blockDim.x + threadIdx.x;
-    const uint innerRowA = threadId / BK;
-    const uint innerColA = threadId % BK;
-    const uint strideA = numThreadsBlocktile / BK;
+    // Each thread will store the sums for the full minitile
+    float sums[TM * TN] = {0.0};
 
-    // const uint innerRowB = threadIdx.x / BN;
-    // const uint innerColB = threadIdx.x % BN;
-    const uint innerRowB = threadId / BN;
-    const uint innerColB = threadId % BN;
-    const uint strideB = numThreadsBlocktile / BN;
+    // These are the values that we reuse
+    float A_reg[TM] = {0.0};
+    float B_reg[TN] = {0.0};
 
-    float threadResults[TM * TN] = {0.0};
-    float regM[TM] = {0.0};
-    float regN[TN] = {0.0};
+    // Outer loop: Iterate over the blocks from A and B to compute the output C tile
+    for (int k_tile = 0; k_tile < K; k_tile += BK){
 
-    // Step 1. Loop across blocks/tiles
-    for (uint bkIdx = 0; bkIdx < K; bkIdx += BK){
-    
-        // Step 1A: Load shared memory
-        for (uint loadOffset = 0; loadOffset < BM; loadOffset += strideA){
-            As[(innerRowA + loadOffset) * BK + innerColA] = A[(innerRowA + loadOffset) * K + innerColA];
+        // Load values from A into smem
+        for (int A_row_offset = 0; A_row_offset < BM; A_row_offset += A_row_stride){
+            A_tile[(A_smem_row + A_row_offset) * BK + A_smem_col] = 
+                 A[(A_smem_row + A_row_offset) * K + A_smem_col];
         }
-        for (uint loadOffset = 0; loadOffset < BK; loadOffset += strideB){
-            Bs[(innerRowB + loadOffset) * BN + innerColB] = B[(innerRowB + loadOffset) * N + innerColB];
+
+        for (int B_row_offset = 0; B_row_offset < BK; B_row_offset += B_row_stride){
+            B_tile[(B_smem_row + B_row_offset) * BN + B_smem_col] = 
+                 B[(B_smem_row + B_row_offset) * N + B_smem_col];
         }
+
         __syncthreads();
-        
+
         A += BK;
         B += BK * N;
-        
-        // Step 1B: Compute outer product
-        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx){
-            for (uint i = 0; i < TM; ++i){
-                // regM[i] = As[(threadRow * TM + i) * BK + dotIdx];
-                regM[i] = As[(threadRow + i) * BK + dotIdx];
+
+        // Middle Loop: Calculate results associate thread each thread
+        for (int k = 0; k < BK; k++){
+
+            // Load one vertical slice from A tile and store in register
+            for (int i = 0; i < TM; i++){
+                A_reg[i] = A_tile[(C_inner_row + i) * BK + k];
             }
-            for (uint i = 0; i < TN; ++i){
-                // regN[i] = Bs[dotIdx * BN + threadCol * TN + i];
-                regN[i] = Bs[dotIdx * BN + threadCol + i];
+
+            // Load one horizontal slice from B tile and store in register
+            for (int j = 0; j < TN; j++){
+                B_reg[j] = B_tile[k * BN + C_inner_col + j];
             }
-            for (uint resIdxM = 0; resIdxM < TM; ++resIdxM){
-                for (uint resIdxN = 0; resIdxN < TN; ++resIdxN){
-                    threadResults[resIdxM * TN + resIdxN] += regM[resIdxM] * regN[resIdxN];
+
+            // Inner Loop: Compute outer product from the registers
+            for (int i = 0; i < TM; i++){
+                for (int j = 0; j < TN; j++){
+                    sums[i * TN + j] += A_reg[i] * B_reg[j];
                 }
             }
         }
         __syncthreads();
     }
-    // Step 2. Write out the results to global memory
-    for (uint resIdxM = 0; resIdxM < TM; ++resIdxM){
-        for (uint resIdxN = 0; resIdxN < TN; ++resIdxN){
-            // C[(threadRow * TM + resIdxM) * N + threadCol * TN + resIdxN] = threadResults[resIdxM * TN + resIdxN];
-            C[(threadRow + resIdxM) * N + threadCol + resIdxN] = threadResults[resIdxM * TN + resIdxN];
+
+    // Each thread saves a minitile of TM * TN
+    for (int i = 0; i < TM; i++){
+        for (int j = 0; j < TN; j++){
+            C[(C_inner_row + i) * N + (C_inner_col + j)] = sums[i * TN + j];
         }
     }
 }
@@ -282,7 +281,6 @@ int main() {
     dim3 gridDim((N + BN - 1) / BN, (M + BM - 1) / BM);
     // dim3 blockDim(BM * BN / (TM * TN));
     dim3 blockDim(BN / TN, BM / TM);
-    // dim3 blockDim(BLOCK_SIZE, BLOCK_SIZE);
     
     // Warm-up
     customMatMul<<<gridDim, blockDim>>>(d_A, d_B, d_C, M, K, N);
